@@ -31,7 +31,7 @@ class NodeSupervisorActorTest extends BaseActorTest {
   val nodeSupervisor = system.actorOf(Props(new NodeSupervisorActor()), "node-supervisor")
 
   val kafkaConfigContent =
-    """
+    """.foreach(println)
       |kafka {
       |  bootstrap.servers = "localhost:9092"
       |  acks = "-1"
