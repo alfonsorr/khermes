@@ -21,6 +21,8 @@ import tech.allegro.schema.json2avro.converter.JsonAvroConverter
 import scala.concurrent.Future
 import scala.concurrent.duration.FiniteDuration
 
+import scala.collection.immutable.Iterable
+
 object FlowCreator extends FlowCreator[Future[Done]] {
   override private[flow] def createSink(hc: AppConfig) = {
     val converter = new JsonAvroConverter()
@@ -64,11 +66,15 @@ trait FlowCreator[M] extends KhermesMetrics {
   private def createSource(hc: AppConfig)(implicit config: Config): Source[String, NotUsed] = {
     val template = TwirlHelper.template[(Faker) => Txt](hc.templateContent, hc.templateName)
     val khermes = Faker(hc.khermesI18n)
-    val a = Source.fromIterator[String](() => Iterator.continually[String](template.static(khermes).toString))
-    val b = Source.fromIterator[String](() => Iterator.continually[String](template.static(khermes).toString))
 
-    //Source.combine(a,b)(Merge(_))
-    a
+    val templateIterator: Iterable[String] = new Iterable[String]{
+      override def iterator: Iterator[String] = new Iterator[String]{
+        override def hasNext: Boolean = true
+
+        override def next(): String = template.static(khermes).toString
+      }
+    }
+    Source[String](templateIterator)
   }
 
   private[flow] def createSink(hc: AppConfig): Sink[String, M]

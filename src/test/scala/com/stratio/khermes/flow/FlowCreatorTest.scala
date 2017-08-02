@@ -77,8 +77,8 @@ class FlowCreatorTest extends BaseActorTest{
   import scala.concurrent.duration._
 
   "A flow creator" should {
-    "the expected amount of messages per seccond" in {
-      val events = 10000000
+    "be limited to the expected amount of messages per second" in {
+      val events = 10000
       val seconds = 1
       val testTimeInSeconds = 10
 
@@ -96,7 +96,7 @@ class FlowCreatorTest extends BaseActorTest{
 
       Thread.sleep(testTimeInSeconds * 1000)
       killSwitch.shutdown()
-      val results = Await.result(probe, 1.seconds).map(_._2)
+      val results = Await.result(probe, 1.seconds).map(_._2).drop(2)
 
       results.foreach(println)
 
