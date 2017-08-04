@@ -163,8 +163,6 @@ class FlowCreatorTest
           val testTimeInSeconds = 3.seconds
           val events = 10
 
-          println(kafkaConfigContent(kafkaServer.config))
-
           val hc = AppConfig(khermesConfigContentLimited(events, 1.seconds), kafkaConfigContent(kafkaServer.config), templateContentNoVariables)
           val testFlow = FlowCreator.create(hc)
           val (killSwitch, probe) = testFlow.run()
@@ -173,7 +171,6 @@ class FlowCreatorTest
           killSwitch.shutdown()
           val _ = Await.result(probe, 1.seconds)
 
-          //val records = Future{consumer.poll(2.seconds.toMillis)}
           val scalaResult = consumer.poll(1.seconds.toMillis).iterator().asScala.toList
 
           scalaResult should not be empty
