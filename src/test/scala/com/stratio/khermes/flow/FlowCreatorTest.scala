@@ -1,32 +1,38 @@
 package com.stratio.khermes.flow
 
 import java.time.LocalTime
+import java.util.UUID
 
-import akka.Done
 import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.{Flow, Keep, Sink}
-import akka.stream.testkit.TestSubscriber.Probe
-import akka.stream.testkit.scaladsl.TestSink
 import com.stratio.khermes.cluster.BaseActorTest
 import com.stratio.khermes.commons.config.AppConfig
+import com.stratio.khermes.utils.EmbeddedServersUtils
+import kafka.server.KafkaConfig
 
+import scala.concurrent.duration.FiniteDuration
 import scala.concurrent.{Await, Future}
 
-class FlowCreatorTest extends BaseActorTest{
+class FlowCreatorTest
+  extends BaseActorTest
+  with EmbeddedServersUtils{
 
   implicit val materializer = ActorMaterializer()
 
-  val kafkaConfigContent =
-    """
+
+  val Topic = s"topic-${UUID.randomUUID().toString}"
+
+  private def kafkaConfigContent(kafkaConfig:KafkaConfig) =
+    s"""
       |kafka {
-      |  bootstrap.servers = "localhost:9092"
+      |  bootstrap.servers = "${kafkaConfig.advertisedHostName}:${kafkaConfig.advertisedPort}"
       |  acks = "-1"
       |  key.serializer = "org.apache.kafka.common.serialization.StringSerializer"
       |  value.serializer = "org.apache.kafka.common.serialization.StringSerializer"
       |}
     """.stripMargin
 
-  val khermesConfigContentUnbounded =
+  private val khermesConfigContentUnbounded =
     """
       |khermes {
       |  templates-path = "/tmp/khermes/templates"
@@ -36,7 +42,7 @@ class FlowCreatorTest extends BaseActorTest{
       |}
     """.stripMargin
 
-  def khermesConfigContentLimited(events:Int, seconds:Int) =
+  private def khermesConfigContentLimited(events:Int, time:FiniteDuration) =
     s"""
       |khermes {
       |  templates-path = "/tmp/khermes/templates"
@@ -45,12 +51,22 @@ class FlowCreatorTest extends BaseActorTest{
       |  i18n = "ES"
       |  timeout-rules {
       |    number-of-events: $events
-      |    duration: $seconds seconds
+      |    duration: ${time.toSeconds} seconds
       |  }
       |}
     """.stripMargin
 
-  val templateContent =
+  private val textToReturn =
+    """{
+      |  "name" : "Something"
+      |}""".stripMargin
+
+
+  private val templateContentNoVariables =
+    s"""@import com.stratio.khermes.helpers.faker.Faker
+      |@(faker: Faker)$textToReturn""".stripMargin
+
+  private val templateContent =
     """
       |@import com.stratio.khermes.helpers.faker.Faker
       |
@@ -60,57 +76,111 @@ class FlowCreatorTest extends BaseActorTest{
       |}
     """.stripMargin
 
-  val avroContent =
-    """
-      |{
-      |  "type": "record",
-      |  "name": "myrecord",
-      |  "fields":
-      |    [
-      |      {"name": "name", "type":"int"}
-      |    ]
-      |}
-    """.stripMargin
-
   type testResult = (Int,LocalTime)
 
   import scala.concurrent.duration._
 
-  "A flow creator" should {
+  "A FlowCreator" should {
+
+    "have a flow that creates strings from templates" in {
+
+      val events = 10
+      val eventsPeriod = 1.seconds
+
+      class FlowCreatorTester extends FlowCreator[Future[String]] {
+        override private[flow] def createSink(hc: AppConfig) = {
+          Sink.head[String]
+        }
+      }
+
+      val hc = AppConfig(khermesConfigContentLimited(events, eventsPeriod), "", templateContentNoVariables)
+      val testFlow = new FlowCreatorTester().create(hc)
+      val (_, probe) = testFlow.run()
+
+      val results = Await.result(probe, eventsPeriod)
+
+      results should be(textToReturn)
+    }
+
     "be limited to the expected amount of messages per second" in {
       val events = 10000
-      val seconds = 1
-      val testTimeInSeconds = 10
-
+      val eventsPeriod = 1.seconds
+      val testTimeInSeconds = 10.seconds
+      val aceptedError = 100.millis
 
       class FlowCreatorTester extends FlowCreator[Future[Seq[testResult]]] {
         override private[flow] def createSink(hc: AppConfig) = {
           val events = hc.timeoutNumberOfEventsOption.get
-          Flow[String].scan(0)((counter, _) => counter +1).filter(n => n % events == 0).map(n => (n,LocalTime.now())).toMat(Sink.seq)(Keep.right)
+          Flow[String].scan(0)((counter, _) => counter + 1).filter(n => n % events == 0).map(n => (n, LocalTime.now())).toMat(Sink.seq)(Keep.right)
         }
       }
 
-      val hc = AppConfig(khermesConfigContentLimited(events, seconds), kafkaConfigContent, templateContent)
+      val hc = AppConfig(khermesConfigContentLimited(events, eventsPeriod), "", templateContent)
       val testFlow = new FlowCreatorTester().create(hc)
-      val (killSwitch,probe) = testFlow.run()
+      val (killSwitch, probe) = testFlow.run()
 
-      Thread.sleep(testTimeInSeconds * 1000)
+      Thread.sleep(testTimeInSeconds.toMillis)
       killSwitch.shutdown()
-      val results = Await.result(probe, 1.seconds).map(_._2).drop(2)
+      val results = Await.result(probe, 1.seconds).map(_._2).drop(2) //the first two seconds the speed is not optimal
 
-      results.foreach(println)
-
-      val millisecondsError = 100
-
-      val nanoSecondsInSecond = Math.pow(10, 9)
-
-      results.zip(results.tail).map(r => (nanoSecondsInSecond - (r._2.toNanoOfDay - r._1.toNanoOfDay)) / 1000000).foreach(errorTime => {
-        errorTime > millisecondsError  shouldNot be(true)
-        errorTime < -millisecondsError  shouldNot  be(true)
+      results.zip(results.tail).map(r => eventsPeriod - (r._2.toNanoOfDay - r._1.toNanoOfDay).nanos).foreach(errorTime => {
+        errorTime should be > (-aceptedError)
+        errorTime should be < aceptedError
       })
+    }
 
-      //results.zip(results.tail).map{ case (pre, post) => post.toNanoOfDay - pre.toNanoOfDay}.foreach(println)
+    "create an unbounded flow" in {
+      val testTimeInSeconds = 3.seconds
+      val aceptedMin = 10000l
 
+      class FlowCreatorTester extends FlowCreator[Future[Long]] {
+        override private[flow] def createSink(hc: AppConfig) = {
+          Sink.fold(0l)((counter, _) => counter + 1)
+        }
+      }
+
+      val hc = AppConfig(khermesConfigContentUnbounded, "", templateContent)
+      val testFlow = new FlowCreatorTester().create(hc)
+      val (killSwitch, probe) = testFlow.run()
+
+      Thread.sleep(testTimeInSeconds.toMillis)
+      killSwitch.shutdown()
+      val results = Await.result(probe, 1.seconds)
+
+      results should be > aceptedMin
+      println(results)
+
+    }
+
+
+
+    "send to kafka" in {
+      withEmbeddedKafkaServer(Seq(Topic)) { kafkaServer =>
+        withKafkaConsumer(kafkaServer){ consumer =>
+          import scala.collection.JavaConverters._
+
+          consumer.subscribe(Seq("chustas").asJava)
+          val testTimeInSeconds = 3.seconds
+          val events = 10
+
+          println(kafkaConfigContent(kafkaServer.config))
+
+          val hc = AppConfig(khermesConfigContentLimited(events, 1.seconds), kafkaConfigContent(kafkaServer.config), templateContentNoVariables)
+          val testFlow = FlowCreator.create(hc)
+          val (killSwitch, probe) = testFlow.run()
+
+          Thread.sleep(testTimeInSeconds.toMillis)
+          killSwitch.shutdown()
+          val _ = Await.result(probe, 1.seconds)
+
+          //val records = Future{consumer.poll(2.seconds.toMillis)}
+          val scalaResult = consumer.poll(1.seconds.toMillis).iterator().asScala.toList
+
+          scalaResult should not be empty
+          scalaResult.foreach(a => a.value() should be(textToReturn))
+          println(scalaResult.length)
+        }
+      }
     }
   }
 }

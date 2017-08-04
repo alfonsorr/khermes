@@ -26,11 +26,13 @@ import com.typesafe.scalalogging.LazyLogging
 import kafka.server.{KafkaConfig, KafkaServer}
 import kafka.utils.{SystemTime, TestUtils}
 import org.apache.curator.test.TestingServer
+import org.apache.kafka.clients.consumer.{ConsumerConfig, KafkaConsumer}
 import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.common.protocol.SecurityProtocol
+import org.apache.kafka.common.serialization.StringDeserializer
 import org.junit.rules.TemporaryFolder
 
-import scala.util.Try
+import scala.util.{Failure, Try}
 
 trait EmbeddedServersUtils extends LazyLogging {
   type TopicName = String
@@ -60,7 +62,7 @@ trait EmbeddedServersUtils extends LazyLogging {
           brokerList, zookeeperConnectString)
 
         function(kafkaServer)
-      }
+      }.recoverWith{case a => logger.error("embedded kafka coudn't start",a); a.printStackTrace(); Failure(a) }
       kafkaServer.shutdown
       zookeeperServer.stop
     }
@@ -75,6 +77,18 @@ trait EmbeddedServersUtils extends LazyLogging {
     val props = kafkaServer.config.originals
     val producer: KafkaProducer[String, V] = new KafkaProducer(props)
     testFunction(producer)
+  }
+
+
+  def withKafkaConsumer(kafkaServer: KafkaServer)(testFunction: KafkaConsumer[String,String] => Any): Unit = {
+    val props = kafkaServer.config.originals
+    val config = new Properties()
+    config.put("group.id", "foo")
+    config.put("bootstrap.servers", props.get("kafka.bootstrap.servers"))
+    config.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
+    val consumer: KafkaConsumer[String, String] = new KafkaConsumer[String,String](config, new StringDeserializer(), new StringDeserializer())
+    testFunction(consumer)
+    consumer.close()
   }
 
   def withKafkaClient[V](kafkaServer: KafkaServer)(function: KafkaClient[V] => Any): Unit = {
